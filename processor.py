@@ -25,8 +25,8 @@ ALIASES = {
     "date": ["date", "transaction date", "expense date"],
     "invoice": ["invoice", "invoice no", "invoice number", "bill no", "receipt no"],
     "type": ["type", "category", "expense type", "expense category"],
-    "particular": ["particular", "particulars", "description", "item", "details"],
-    "amount_inr": ["amount (inr)", "amount inr", "amount", "expense amount", "value"],
+    "particular": ["particular", "particulars", "perticular", "description", "item", "details"],
+    "amount_inr": ["amount (inr)", "amount inr", "amount", "inr", "expense amount", "value"],
     "paid_by": ["paid by", "payer", "payment by", "paidby"],
     "comments": ["comments", "comment", "notes", "remarks"],
 }
@@ -278,6 +278,185 @@ def calculate_metrics(df):
         "valid_transaction_count": int(len(valid)),
     }
 
+def locate_table_frame(rows, required_headers):
+    for header_idx, row in enumerate(rows[:20]):
+        normalized = [clean_header(value) for value in row]
+        if not all(any(alias in normalized for alias in aliases) for aliases in required_headers):
+            continue
+        width = len(row)
+        data = []
+        for source_row in rows[header_idx + 1:]:
+            padded = list(source_row[:width]) + [""] * max(0, width - len(source_row))
+            if not any(value is not None and str(value).strip() for value in padded):
+                continue
+            data.append(padded[:width])
+        return pd.DataFrame(data, columns=[str(value or "").strip() for value in row])
+    return None
+
+def prepare_daily_income(raw_sheets):
+    sheet_name = next(
+        (name for name in raw_sheets if clean_header(name).replace(" ", "_") == "daily_tally"),
+        None,
+    )
+    if sheet_name is None:
+        return pd.DataFrame(columns=["date", "kiosk_income", "dns_income", "income_inr"])
+
+    required_headers = [
+        ["date"], ["kiosk online"], ["kiosk cash"], ["dns online"], ["dns cash"]
+    ]
+    source_df = locate_table_frame(raw_sheets[sheet_name], required_headers)
+    if source_df is None:
+        return pd.DataFrame(columns=["date", "kiosk_income", "dns_income", "income_inr"])
+
+    lookup = {clean_header(column): column for column in source_df.columns}
+
+    def amount_column(name):
+        return source_df[lookup[name]].apply(parse_amount)
+
+    income = pd.DataFrame()
+    income["date"] = pd.to_datetime(source_df[lookup["date"]], errors="coerce", dayfirst=True)
+    for key, source_name in {
+        "kiosk_online": "kiosk online",
+        "kiosk_cash": "kiosk cash",
+        "dns_online": "dns online",
+        "dns_cash": "dns cash",
+    }.items():
+        income[key] = amount_column(source_name)
+
+    for key, source_name in {
+        "dwarkadesh_dns_reported": "dwarkadesh income dns",
+        "tanmayee_dns_reported": "tanmayee income dns",
+        "swiggy_reported": "swiggy",
+        "zomato_reported": "zomato",
+    }.items():
+        income[key] = amount_column(source_name) if source_name in lookup else None
+
+    income["kiosk_income"] = income[["kiosk_online", "kiosk_cash"]].sum(axis=1, min_count=1)
+    income["dns_income"] = income[["dns_online", "dns_cash"]].sum(axis=1, min_count=1)
+    income["income_inr"] = income[["kiosk_income", "dns_income"]].sum(axis=1, min_count=1)
+    income["other_reported_income_inr"] = income[
+        ["dwarkadesh_dns_reported", "tanmayee_dns_reported", "swiggy_reported", "zomato_reported"]
+    ].sum(axis=1, min_count=1)
+    income["is_calculable"] = income["date"].notna() & income["income_inr"].notna()
+    income["source_sheet"] = sheet_name
+    return income
+
+def prepare_supplemental_spending(raw_sheets):
+    frames = []
+    for sheet_name, rows in raw_sheets.items():
+        normalized_name = clean_header(sheet_name)
+        if normalized_name not in {"investment", "delrico"}:
+            continue
+        source_df = locate_header_and_frame(rows)
+        if source_df is None:
+            continue
+        mapped = map_columns(source_df)
+        if "date" not in mapped or "amount_inr" not in mapped:
+            continue
+        frame = pd.DataFrame({
+            "date": pd.to_datetime(source_df[mapped["date"]], errors="coerce", dayfirst=True),
+            "invoice": source_df[mapped["invoice"]] if "invoice" in mapped else "",
+            "particular": source_df[mapped["particular"]] if "particular" in mapped else "",
+            "amount_inr": source_df[mapped["amount_inr"]].apply(parse_amount),
+            "paid_by": source_df[mapped["paid_by"]] if "paid_by" in mapped else "",
+            "source_sheet": sheet_name,
+        })
+        for column in ["invoice", "particular", "paid_by"]:
+            frame[column] = frame[column].fillna("").astype(str).str.strip()
+        frame = frame[frame["date"].notna() & frame["amount_inr"].notna()]
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+        columns=["date", "invoice", "particular", "amount_inr", "paid_by", "source_sheet"]
+    )
+
+def prepare_prasad_activity(raw_sheets):
+    sheet_name = next(
+        (name for name in raw_sheets if clean_header(name) == "prasad"),
+        None,
+    )
+    if sheet_name is None:
+        return pd.DataFrame(columns=["date", "received_inr", "spent_inr"])
+    source_df = locate_table_frame(raw_sheets[sheet_name], [["date"], ["received"], ["spent"]])
+    if source_df is None:
+        return pd.DataFrame(columns=["date", "received_inr", "spent_inr"])
+    lookup = {clean_header(column): column for column in source_df.columns}
+    activity = pd.DataFrame({
+        "date": pd.to_datetime(source_df[lookup["date"]], errors="coerce", dayfirst=True),
+        "received_inr": source_df[lookup["received"]].apply(parse_amount),
+        "spent_inr": source_df[lookup["spent"]].apply(parse_amount),
+    })
+    activity["source_sheet"] = sheet_name
+    return activity
+
+def calculate_monthly_financials(expenses, income):
+    expense_rows = expenses[expenses["is_calculable"]].copy()
+    income_rows = income[income["is_calculable"]].copy()
+    if expense_rows.empty and income_rows.empty:
+        return pd.DataFrame()
+
+    expense_rows["month"] = expense_rows["date"].dt.to_period("M")
+    income_rows["month"] = income_rows["date"].dt.to_period("M")
+    expense_totals = expense_rows.groupby("month")["amount_inr"].sum()
+    income_totals = income_rows.groupby("month")["income_inr"].sum()
+    kiosk_totals = income_rows.groupby("month")["kiosk_income"].sum(min_count=1)
+    dns_totals = income_rows.groupby("month")["dns_income"].sum(min_count=1)
+    other_income_totals = income_rows.groupby("month")["other_reported_income_inr"].sum(min_count=1)
+    first_month = min(
+        value for value in [expense_totals.index.min() if not expense_totals.empty else None,
+                            income_totals.index.min() if not income_totals.empty else None]
+        if value is not None
+    )
+    last_month = max(
+        value for value in [expense_totals.index.max() if not expense_totals.empty else None,
+                            income_totals.index.max() if not income_totals.empty else None]
+        if value is not None
+    )
+    months = pd.period_range(first_month, last_month, freq="M")
+    monthly = pd.DataFrame(index=months)
+    monthly.index.name = "month"
+    monthly["income_inr"] = income_totals.reindex(months, fill_value=0.0)
+    monthly["kiosk_income_inr"] = kiosk_totals.reindex(months, fill_value=0.0)
+    monthly["dns_income_inr"] = dns_totals.reindex(months, fill_value=0.0)
+    monthly["other_reported_income_inr"] = other_income_totals.reindex(months, fill_value=0.0)
+    monthly["operating_expenses_inr"] = expense_totals.reindex(months, fill_value=0.0)
+    monthly["surplus_inr"] = monthly["income_inr"] - monthly["operating_expenses_inr"]
+    monthly["margin_pct"] = (
+        monthly["surplus_inr"] / monthly["income_inr"].where(monthly["income_inr"].ne(0)) * 100
+    )
+    monthly["margin_change_pp"] = monthly["margin_pct"].diff()
+    return monthly.reset_index().assign(month=lambda frame: frame["month"].astype(str))
+
+def summarize_workbook_sheets(raw_sheets):
+    roles = {
+        "monhtly_expense": "Operating expense ledger",
+        "daily_tally": "Daily cash and online sales receipts",
+        "investment": "Investment and asset spending; separate from operating expenses",
+        "prasad": "Received/spent account activity; not treated as sales income",
+        "delrico": "Vendor spending detail; may overlap other ledgers",
+        "consolidated": "Existing formula summary; not independently reconciled",
+        "sheet9": "Supplemental worksheet",
+    }
+    summaries = []
+    for name, rows in raw_sheets.items():
+        populated_rows = [
+            row for row in rows
+            if any(value is not None and str(value).strip() for value in row)
+        ]
+        header = next((
+            row for row in rows[:20]
+            if sum(value is not None and bool(str(value).strip()) for value in row) >= 3
+            and any(clean_header(value) == "date" for value in row if value is not None)
+        ), None)
+        columns = [str(value).strip() for value in header if value is not None and str(value).strip()] if header else []
+        role = roles.get(clean_header(name).replace(" ", "_"), "Supplemental worksheet")
+        summaries.append({
+            "Worksheet": name,
+            "Populated rows": len(populated_rows),
+            "Detected fields": ", ".join(columns),
+            "Reporting role": role,
+        })
+    return pd.DataFrame(summaries)
+
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
@@ -341,7 +520,11 @@ def run_refresh(record_run=True):
 
     ledger_name, raw_ledger = detect_ledger_sheet(raw_sheets)
     df, issues, missing = prepare_transactions(raw_ledger)
+    daily_income = prepare_daily_income(raw_sheets)
+    supplemental_spending = prepare_supplemental_spending(raw_sheets)
+    prasad_activity = prepare_prasad_activity(raw_sheets)
     metrics = calculate_metrics(df)
+    monthly_finances = calculate_monthly_financials(df, daily_income)
     metrics["issue_count"] = int(len(issues))
     if record_run:
         save_run(title, ledger_name, metrics, len(issues))
@@ -351,10 +534,16 @@ def run_refresh(record_run=True):
         "source_location": source_location,
         "ledger_sheet": ledger_name,
         "data": df,
+        "daily_income": daily_income,
+        "supplemental_spending": supplemental_spending,
+        "prasad_activity": prasad_activity,
+        "monthly_finances": monthly_finances,
+        "sheet_overview": summarize_workbook_sheets(raw_sheets),
         "issues": issues,
         "missing_columns": missing,
         "metrics": metrics,
         "sheet_names": list(raw_sheets.keys()),
+        "raw_sheets": raw_sheets,
         "consolidated_found": any(s.lower().strip() == "consolidated" for s in raw_sheets),
     }
 

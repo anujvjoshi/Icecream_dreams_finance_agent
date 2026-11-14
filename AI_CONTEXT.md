@@ -1,74 +1,56 @@
 # Project Context: Ice Cream Dreams Finance Agent
 
-Use this document as a portable briefing when asking an AI assistant to work on this repository. It describes the checked-in implementation, not a fully reconciled accounting system. Confirm current code and configuration before making changes.
+Use this as a portable briefing for AI assistants working in this repository. It describes the current implementation, not a fully reconciled finance system. `PROJECT_REQUIREMENTS.md` records target requirements and factual coverage statuses.
 
-`PROJECT_REQUIREMENTS.md` records the target product requirements and an implementation coverage matrix. Treat those requirements as goals, not as evidence that the current code already supports them.
-
-# Project Context: Ice Cream Dreams Finance Agent
-
-Use this document as a portable briefing when asking an AI assistant to work on this repository. It describes the checked-in implementation, not a fully reconciled accounting system. Confirm current code and configuration before making changes.
 ## Purpose
 
-This is a local Python application that reads the configured Excel workbook in read-only mode by default, validates and summarizes transactions, and displays results in a Streamlit dashboard. Google Sheets remains an optional source. A separate process records a scheduled daily refresh. The project is an operational baseline for expense monitoring, not an accounting, tax, revenue, profit, or cash-balance system.
+This local Python application reads the configured Excel workbook in read-only mode by default, validates and summarizes expense transactions, and displays results in a Streamlit dashboard. Google Sheets remains an optional source. The app does not calculate verified profit, revenue completeness, or cash balances.
 
 ## Repository Map
- `excel_source.py`: read-only loading of workbook worksheet values from the configured Excel file.
- `google_sheets.py`: optional Google OAuth setup and read-only retrieval of spreadsheet metadata and worksheet values.
-- `google_sheets.py`: Google OAuth setup and read-only retrieval of spreadsheet metadata and worksheet values.
-- `processor.py`: worksheet/header detection, column mapping, parsing, category normalization, validation, period metrics, and SQLite run history.
-The local source workbook `Ice Cream Dreams - Expense Report.xlsx` is financial data and is excluded from Git by spreadsheet ignore rules. Its `Monhtly_Expense` tab has a row 3 header matching the expected transaction fields and is configured as the active ledger. Other transaction-like tabs are not combined automatically.
-- `app.py`: Streamlit dashboard, refresh behavior, filters, charts, transaction table, CSV download, and issue display.
-- `scheduler.py`: blocking APScheduler process for the daily refresh.
-- `README.md`: installation, setup, operations, troubleshooting, and documented limitations.
-2. `excel_source.read_workbook()` opens `WORKBOOK_PATH` using `openpyxl` in read-only, cached-value mode and returns worksheet rows. Set `SOURCE_TYPE=google_sheets` to use the optional OAuth reader instead.
-2. `processor.detect_ledger_sheet()` selects `LEDGER_SHEET` when configured; otherwise it detects candidate tabs from their headers. It scans the first 20 rows for a likely header and ignores blank cells and rows.
-- `com.icecreamdreams.financeagent.plist.example`: macOS LaunchAgent template; paths must be customized before use.
-- `.github/copilot-instructions.md`: repository-wide guidance to keep this context current after AI-assisted code/configuration changes.
-5. `run_refresh()` returns the processed DataFrame, issue DataFrame, metrics, selected worksheet, source type/location, and source title. Scheduled/one-shot refreshes record run metadata and metrics in SQLite; dashboard refreshes pass `record_run=False`.
-- `.github/agents/context-maintainer.agent.md`: dedicated agent for auditing and updating this context on request.
-- `PROJECT_REQUIREMENTS.md`: target product requirements, current coverage, and open workbook-dependent inputs.
- `SOURCE_TYPE`: defaults to `excel`; set to `google_sheets` for the optional Google Sheets reader.
- `WORKBOOK_PATH`: defaults to `Ice Cream Dreams - Expense Report.xlsx` beside the application; absolute and project-relative paths are supported.
- `LEDGER_SHEET`: defaults in `.env.example` to `Monhtly_Expense`; otherwise auto-detection is used.
- `SPREADSHEET_ID`: required only for optional Google Sheets mode; do not commit a live identifier.
 
- `SCHEDULE_TIME`: daily scheduler time, default `09:00` in `TIMEZONE`.
+- `excel_source.py`: read-only loading of workbook worksheet values using `openpyxl`.
+- `google_sheets.py`: optional Google OAuth and read-only Sheets API source.
+- `processor.py`: sheet/header detection, parsing, validation, monthly metrics, and SQLite run history.
+- `app.py`: Streamlit dashboard, finance comparisons, worksheet explorer, filters, charts, and CSV export.
+- `agent.py`: one-shot refresh and execution logging.
+- `scheduler.py`: daily APScheduler process.
+- `README.md`: setup, operations, and limitations.
+- `PROJECT_REQUIREMENTS.md`: target requirements and current coverage.
+- `.github/copilot-instructions.md` and `.github/agents/context-maintainer.agent.md`: context maintenance guidance and agent.
 
-The default Excel source requires no OAuth. Optional Google Sheets mode requires local Desktop OAuth files named `credentials.json` and `token.json`. These, `.env`, SQLite databases, logs, and Excel workbooks are excluded from Git. Never ask a user to paste OAuth secrets or tokens into an AI conversation.
+## Workbook and Data Flow
 
-With Python 3.10.7+, the workbook in the project directory, and a configured `.env` if needed:
-2. `processor.detect_ledger_sheet()` selects `LEDGER_SHEET` when configured; otherwise it detects candidate tabs from their headers. It scans the first 20 rows for a likely header and reads values from columns A through Z.
- Keep both Excel and optional Google Sheets source access read-only.
-4. `calculate_metrics()` computes lifetime, daily, weekly, monthly, previous-month, and financial-year expense metrics using `TIMEZONE` and `FINANCIAL_YEAR_START_MONTH`.
- The `Consolidated` formulas have been inspected structurally but not independently recalculated or reconciled against the ledger.
- Other transaction-like workbook tabs are not automatically included; `Monhtly_Expense` is the configured ledger.
- Excel dates and unusual merged/multi-row headers may require mapping adjustments.
+The local source is `Ice Cream Dreams - Expense Report.xlsx`, excluded from Git. The workbook contains seven sheets. `Monhtly_Expense` is configured as the active operating ledger; other transaction-like sheets are not silently merged into that ledger.
 
-## Data Contract and Rules
+1. `excel_source.read_workbook()` resolves `WORKBOOK_PATH`, opens the workbook with `read_only=True` and `data_only=True`, and returns values for every worksheet without modifying the source.
+2. `processor.run_refresh()` defaults to `SOURCE_TYPE=excel`; `SOURCE_TYPE=google_sheets` opts into the legacy OAuth reader.
+3. `detect_ledger_sheet()` selects `LEDGER_SHEET` when configured or detects a candidate from headers in the first 20 rows. Blank `None` and NaN cells/rows are ignored.
+4. `prepare_transactions()` parses `Monhtly_Expense`, normalizes categories, and flags issues. Invalid dates/amounts remain visible but are excluded from expense metrics.
+5. `prepare_daily_income()` uses Kiosk/DNS cash and online columns from `DAILY_TALLY` to calculate reported receipts. Separate attributed/platform income fields are displayed but excluded from margin because overlap is unverified.
+6. Investment/Delrico spending and Prasad received/spent activity are parsed and displayed separately; they are not added to operating-ledger expense or receipt totals. Investment/vendor spend shares use the total displayed Investment/Delrico amount as the denominator. The dashboard includes an overview and on-demand row explorer for every sheet.
+7. Monthly comparison uses reported Kiosk/DNS receipts versus amounts in `Monhtly_Expense`. Margin is `(receipts - ledger amount) / receipts`; month-to-month margin movement is the percentage-point difference from the previous calendar month. Treat this as provisional, not verified profit margin.
 
-The expected ledger fields are Date, Invoice, Type/category, Particular/description, Amount (INR), Paid By, and Comments. Source column names are normalized to lowercase with spaces converted to underscores and periods removed. The processor maps common variants such as `INR` and `amount_inr` to the amount field, and preserves canonical transaction fields such as `amount_inr` and `comments`. Column aliases and category rules are defined in `processor.py` and should be extended conservatively when the real source headings or categories require it.
-
-Date and amount are required for calculation. A row with either missing or invalid value remains in the displayed/validated data but is excluded from period totals. Negative amounts remain in totals and are flagged for review; do not assume whether they are refunds or adjustments. Duplicate invoice numbers and potential duplicate rows are warnings, not automatic deletions. Missing descriptions/categories, unmapped categories, and optionally high amounts are flagged for review.
-
-The `Consolidated` tab may be identified, but no formula-by-formula reconciliation is implemented. Do not claim that ledger totals have been reconciled to that tab. Category classification is deterministic; there is no external LLM or AI service in the current implementation.
+A read-only check on the supplied workbook found 125 calculable ledger transactions, 333 dated receipt rows, 135 dated investment/vendor records, 38 Prasad activity rows, and 13 monthly periods. These are structural/runtime check counts, not a claim of reconciliation.
 
 ## Configuration
 
 Configuration is loaded from `.env` when present. `.env.example` documents:
 
-- `SPREADSHEET_ID`: ID of the source Google spreadsheet; treat as deployment-specific configuration.
-- `LEDGER_SHEET`: optional exact worksheet tab name; otherwise auto-detection is used.
+- `SOURCE_TYPE`: defaults to `excel`; set to `google_sheets` for the optional Sheets reader.
+- `WORKBOOK_PATH`: defaults to `Ice Cream Dreams - Expense Report.xlsx`; supports absolute or project-relative paths.
+- `LEDGER_SHEET`: defaults to `Monhtly_Expense` in `.env.example`.
 - `TIMEZONE`: defaults to `Asia/Kolkata`.
-- `SCHEDULE_TIME`: daily scheduler time, default `14:00` in `TIMEZONE`.
-- `DASHBOARD_REFRESH_SECONDS`: dashboard refresh interval, default `300` seconds while the page is open.
-- `FINANCIAL_YEAR_START_MONTH`: defaults to `4` (April).
-- `HIGH_EXPENSE_THRESHOLD`: optional INR warning threshold; blank disables it.
+- `SCHEDULE_TIME`: scheduler default is `09:00`; local `.env` can override it.
+- `DASHBOARD_REFRESH_SECONDS`: defaults to 300 seconds while the dashboard is open.
+- `FINANCIAL_YEAR_START_MONTH`: defaults to 4 (April).
+- `HIGH_EXPENSE_THRESHOLD`: optional INR review threshold.
+- `SPREADSHEET_ID`: needed only for optional Google Sheets mode; do not commit a live identifier.
 
-Google OAuth requires a local Desktop OAuth client file named `credentials.json`. The authorized token is stored in `token.json`. Both files are sensitive and are ignored by Git along with `.env`, SQLite databases, and logs. Never ask a user to paste their OAuth secrets or token into an AI conversation.
+The default Excel source requires no OAuth. Optional Google Sheets mode requires private local `credentials.json` and `token.json`. `.env`, Excel workbooks, credentials, local databases, and logs must remain untracked and must not be copied into AI prompts.
 
-## Running Locally
+## Running
 
-With Python 3.10.7+ and a configured `.env`, `credentials.json`, and spreadsheet access:
+With Python 3.10.7+:
 
 ```bash
 python3 -m venv .venv
@@ -79,23 +61,14 @@ streamlit run app.py
 python scheduler.py
 ```
 
-The dashboard and scheduler are separate processes. The scheduler must remain running (or be managed by a process manager) to execute daily. The README contains the fuller macOS LaunchAgent setup.
+The dashboard and daily scheduler are separate processes. See `README.md` for LaunchAgent setup.
 
-## Safety and Change Guidance
+## Safety and Limitations
 
-- Preserve the read-only Google Sheets scope and behavior unless the user explicitly authorizes a change to source data access.
-- Treat this as financial data: avoid exposing transaction details, spreadsheet identifiers, OAuth material, local database contents, or logs unnecessarily.
-- Do not infer revenue, profit, balances, payment status, refund semantics, or accounting reconciliation from expense rows alone.
-- Keep validation findings distinct from corrections. Never silently delete or rewrite source transactions.
-- For changes to parsing, category rules, or metrics, use representative edge cases (ambiguous dates, formatted currency, negative values, missing fields, duplicates, and timezone/period boundaries).
-- Follow the existing Python style and keep changes scoped. Check available tests and diagnostics before claiming behavior is verified; this repository currently documents no dedicated test suite.
-- Read `README.md` and the relevant implementation before changing behavior. Treat comments and this context as a guide, and verify against current code.
-
-## Known Limitations
-
-- The source workbook's `Consolidated` formulas have not been inspected or reconciled with the ledger.
-- Google Sheets date formatting and unusual multi-row or merged headers may need mapping adjustments.
-- Amount/date interpretation and category mapping are intentionally heuristic/conservative.
-- Dashboard refresh occurs only while its page is open; the daily scheduler is independent.
-- Run history stores metadata and metrics, not a transaction-level SQLite mirror.
-- The current implementation does not send notifications.
+- Keep both source adapters read-only. Never rewrite, delete, or silently correct source transactions.
+- Treat workbook data, spreadsheet identifiers, OAuth material, local databases, and logs as sensitive.
+- Duplicate and missing-data findings are review flags, not automatic corrections. Negative amounts remain in totals and require interpretation.
+- The displayed margin is provisional: it excludes unverified attributed/platform receipts, and transfers or ledger classifications may distort the expense side.
+- `Consolidated` has been structurally inspected, but its formulas have not been independently recalculated or reconciled against the ledger. Do not claim reconciliation.
+- Workbook modification monitoring, last-successful dashboard snapshot recovery, notifications, and transaction-level history are not implemented.
+- There is no dedicated test suite in the repository. Validate parsing changes against representative cases and do not claim unrun acceptance checks.

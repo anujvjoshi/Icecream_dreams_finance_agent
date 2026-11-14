@@ -99,6 +99,9 @@ python scheduler.py
 
 - The Excel source is opened in read-only mode; the source workbook is never modified.
 - The app detects the ledger worksheet from its column headers; `LEDGER_SHEET` can select an exact tab.
+- The dashboard compares `Monhtly_Expense` amounts with Kiosk/DNS cash and online receipts from `DAILY_TALLY`. Margin is provisional; attribution/platform income, investments, and Prasad account movements are shown separately to avoid unverified double counting.
+- The dashboard provides an overview and on-demand row explorer for every workbook sheet. Values are read from stored/cached cells; formulas are not recalculated by the app.
+- Investment/vendor summary includes each source/payer group's percentage of the total displayed Investment/Delrico amount; it is separate from operating expenses.
 - The `Consolidated` worksheet has been structurally inspected, but its formulas are not independently reconciled against the transaction ledger. Do not claim reconciliation.
 - The app flags missing/invalid dates and amounts, missing descriptions/categories, duplicate invoice numbers, potential duplicate rows and negative amounts.
 - Rows with invalid dates or amounts are excluded from period totals and remain visible as validation issues.

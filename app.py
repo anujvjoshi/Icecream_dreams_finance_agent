@@ -73,7 +73,7 @@ result = st.session_state.get("finance_result")
 error = st.session_state.get("refresh_error")
 
 st.title("Expense Intelligence Dashboard")
-st.caption("Live expense monitoring, reconciliation and management insights")
+st.caption("Live expense monitoring, workbook-wide financial summaries and management insights")
 
 if error:
     st.error(f"Could not refresh source data: {error}")
@@ -137,6 +137,81 @@ k6.metric("Average daily this month", inr(metrics["average_daily_month"]))
 k7.metric("Transactions", f'{metrics["transaction_count"]:,}')
 k8.metric("Data quality issues", f'{len(issues):,}')
 
+finance_by_month = result["monthly_finances"]
+if not finance_by_month.empty:
+    latest_finance = finance_by_month.iloc[-1]
+    latest_margin = latest_finance["margin_pct"]
+    latest_margin_change = latest_finance["margin_change_pp"]
+
+    st.divider()
+    st.subheader("Monthly receipts vs ledger expenses")
+    st.caption(
+        "Receipts use Kiosk and DNS cash/online fields in DAILY_TALLY; expenses use Monhtly_Expense. "
+        "Investments and Prasad account movements are reported separately. Margin is provisional."
+    )
+    f1, f2, f3, f4, f5 = st.columns(5)
+    f1.metric(f"Latest month receipts · {latest_finance['month']}", inr(latest_finance["income_inr"]))
+    f2.metric("Ledger expenses", inr(latest_finance["operating_expenses_inr"]))
+    f3.metric("Recorded net", inr(latest_finance["surplus_inr"]))
+    f4.metric("Provisional margin", "N/A" if pd.isna(latest_margin) else f"{latest_margin:.1f}%")
+    f5.metric(
+        "MoM margin change",
+        "N/A" if pd.isna(latest_margin_change) else f"{latest_margin_change:+.1f} pp",
+    )
+
+    finance_left, finance_right = st.columns([1.2, 0.8])
+    with finance_left:
+        finance_chart = finance_by_month.rename(columns={
+            "income_inr": "Reported receipts",
+            "operating_expenses_inr": "Recorded ledger expenses",
+        })
+        fig = px.bar(
+            finance_chart,
+            x="month",
+            y=["Reported receipts", "Recorded ledger expenses"],
+            barmode="group",
+            labels={"month": "Month", "value": "Amount (INR)", "variable": "Measure"},
+        )
+        fig.update_layout(height=360, margin=dict(l=10, r=10, t=20, b=10), legend_title_text="")
+        st.plotly_chart(fig, use_container_width=True)
+    with finance_right:
+        margin_chart = finance_by_month.dropna(subset=["margin_pct"])
+        if not margin_chart.empty:
+            fig = px.line(
+                margin_chart,
+                x="month",
+                y="margin_pct",
+                markers=True,
+                labels={"month": "Month", "margin_pct": "Provisional margin (%)"},
+            )
+            fig.update_layout(height=360, margin=dict(l=10, r=10, t=20, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Margin is unavailable because receipts are missing for the reported periods.")
+
+    finance_display = finance_by_month[[
+        "month", "income_inr", "operating_expenses_inr", "surplus_inr",
+        "margin_pct", "margin_change_pp", "kiosk_income_inr", "dns_income_inr",
+        "other_reported_income_inr",
+    ]].copy()
+    finance_display = finance_display.rename(columns={
+        "month": "Month",
+        "income_inr": "Receipts (INR)",
+        "operating_expenses_inr": "Ledger expenses (INR)",
+        "surplus_inr": "Surplus (INR)",
+        "margin_pct": "Provisional margin (%)",
+        "margin_change_pp": "MoM margin change (pp)",
+        "kiosk_income_inr": "Kiosk receipts (INR)",
+        "dns_income_inr": "DNS receipts (INR)",
+        "other_reported_income_inr": "Other reported income (INR, excluded)",
+    })
+    st.dataframe(finance_display, use_container_width=True, hide_index=True)
+    st.caption(
+        "Provisional margin = (Kiosk/DNS cash and online receipts − Monhtly_Expense ledger amount) ÷ receipts. "
+        "MoM change is shown in percentage points. Other attributed/platform income is excluded "
+        "from margin because overlap with receipt totals has not been verified."
+    )
+
 st.divider()
 left, right = st.columns([1.15, 0.85])
 
@@ -161,6 +236,25 @@ with right:
     else:
         st.info("No category data available.")
 
+if not filtered.empty:
+    category_detail = filtered.groupby("category", as_index=False).agg(
+        amount_inr=("amount_inr", "sum"),
+        transactions=("amount_inr", "size"),
+        average_amount_inr=("amount_inr", "mean"),
+    ).sort_values("amount_inr", ascending=False)
+    category_total = category_detail["amount_inr"].sum()
+    category_detail["share_pct"] = (
+        category_detail["amount_inr"] / category_total * 100 if category_total else 0
+    )
+    category_detail = category_detail.rename(columns={
+        "category": "Category",
+        "amount_inr": "Spend (INR)",
+        "transactions": "Transactions",
+        "average_amount_inr": "Average transaction (INR)",
+        "share_pct": "Share of filtered spend (%)",
+    })
+    st.dataframe(category_detail, use_container_width=True, hide_index=True)
+
 st.divider()
 left, right = st.columns(2)
 with left:
@@ -176,12 +270,29 @@ with left:
 
 with right:
     st.subheader("Paid by")
-    payer = filtered[filtered["paid_by"].ne("")].groupby("paid_by", as_index=False)["amount_inr"].sum().sort_values("amount_inr", ascending=False)
+    payer_rows = filtered.copy()
+    payer_rows["paid_by"] = payer_rows["paid_by"].replace("", "Not recorded")
+    payer = payer_rows.groupby("paid_by", as_index=False).agg(
+        amount_inr=("amount_inr", "sum"),
+        transactions=("amount_inr", "size"),
+        average_amount_inr=("amount_inr", "mean"),
+    ).sort_values("amount_inr", ascending=False)
+    payer_total = payer["amount_inr"].sum()
+    payer["share_pct"] = payer["amount_inr"] / payer_total * 100 if payer_total else 0
     if not payer.empty:
         fig = px.bar(payer, x="paid_by", y="amount_inr",
                      labels={"paid_by": "Paid by", "amount_inr": "Amount (INR)"})
         fig.update_layout(height=340, margin=dict(l=10,r=10,t=20,b=10))
         st.plotly_chart(fig, use_container_width=True)
+        payer = payer.rename(columns={
+            "paid_by": "Recorded payer",
+            "amount_inr": "Spend (INR)",
+            "transactions": "Transactions",
+            "average_amount_inr": "Average transaction (INR)",
+            "share_pct": "Share of filtered spend (%)",
+        })
+        st.dataframe(payer, use_container_width=True, hide_index=True)
+        st.caption("Paid By is shown as recorded in the ledger; it does not establish funding source or reimbursement status.")
     else:
         st.info("No payer information available.")
 
@@ -209,6 +320,92 @@ show_cols = ["Date", "Invoice", "Type", "Normalized category", "Particular", "Am
 st.dataframe(display[show_cols], use_container_width=True, hide_index=True)
 csv = display[show_cols].to_csv(index=False).encode("utf-8-sig")
 st.download_button("Download filtered transactions (CSV)", csv, "ice_cream_dreams_transactions.csv", "text/csv")
+
+st.divider()
+st.subheader("Other workbook sheets")
+st.dataframe(result["sheet_overview"], use_container_width=True, hide_index=True)
+with st.expander("Inspect source worksheet rows", expanded=False):
+    selected_sheet = st.selectbox("Worksheet", result["sheet_names"], key="source_sheet_preview")
+    source_rows = result["raw_sheets"][selected_sheet]
+    header_index = next((
+        index for index, row in enumerate(source_rows[:20])
+        if sum(value is not None and bool(str(value).strip()) for value in row) >= 3
+        and any(str(value).strip().lower() == "date" for value in row if value is not None)
+    ), None)
+    if header_index is None:
+        source_width = max((len(row) for row in source_rows), default=0)
+        preview_rows = [
+            list(row[:source_width]) + [None] * max(0, source_width - len(row))
+            for row in source_rows
+        ]
+        preview = pd.DataFrame(preview_rows)
+        preview.columns = [f"Column {index + 1}" for index in range(len(preview.columns))]
+        preview.insert(0, "Source row", range(1, len(preview) + 1))
+    else:
+        source_width = max((len(row) for row in source_rows), default=0)
+        header_row = list(source_rows[header_index])
+        header_row.extend([None] * (source_width - len(header_row)))
+        headers = []
+        for index, value in enumerate(header_row):
+            label = str(value).strip() if value is not None and str(value).strip() else f"Column {index + 1}"
+            if label in headers:
+                label = f"{label} ({index + 1})"
+            headers.append(label)
+        preview_rows = [
+            list(row[:source_width]) + [None] * max(0, source_width - len(row))
+            for row in source_rows[header_index + 1:]
+        ]
+        preview = pd.DataFrame(preview_rows, columns=headers)
+        preview.insert(0, "Source row", range(header_index + 2, header_index + 2 + len(preview)))
+    preview = preview.dropna(how="all")
+    max_preview_rows = st.selectbox("Maximum rows", [100, 500, 1000], index=0, key="source_sheet_preview_limit")
+    st.caption("Displays stored/cached worksheet values; formulas are not recalculated by this dashboard.")
+    st.dataframe(preview.head(max_preview_rows), use_container_width=True, hide_index=True)
+
+supplemental_spending = result["supplemental_spending"]
+if not supplemental_spending.empty:
+    st.subheader("Investment and vendor spending")
+    st.caption("Kept separate from operating expenses; vendor sheets may overlap other records.")
+    investment_summary = supplemental_spending.copy()
+    investment_summary["paid_by"] = investment_summary["paid_by"].replace("", "Not recorded")
+    investment_summary = investment_summary.groupby(
+        ["source_sheet", "paid_by"], as_index=False
+    ).agg(
+        amount_inr=("amount_inr", "sum"),
+        transactions=("amount_inr", "size"),
+    ).sort_values("amount_inr", ascending=False)
+    total_supplemental_spend = investment_summary["amount_inr"].sum()
+    investment_summary["share_pct"] = (
+        investment_summary["amount_inr"] / total_supplemental_spend * 100
+        if total_supplemental_spend else 0
+    )
+    investment_summary = investment_summary.rename(columns={
+        "source_sheet": "Worksheet",
+        "paid_by": "Recorded payer",
+        "amount_inr": "Recorded amount (INR)",
+        "transactions": "Transactions",
+        "share_pct": "Share of investment/vendor spend (%)",
+    })
+    st.dataframe(investment_summary, use_container_width=True, hide_index=True)
+
+prasad_activity = result["prasad_activity"].copy()
+prasad_activity = prasad_activity[
+    prasad_activity["date"].notna()
+    & (prasad_activity["received_inr"].notna() | prasad_activity["spent_inr"].notna())
+]
+if not prasad_activity.empty:
+    st.subheader("Prasad account movements")
+    st.caption("Reported receipts and spending in this account ledger; excluded from sales and operating margin.")
+    prasad_activity["month"] = prasad_activity["date"].dt.to_period("M").astype(str)
+    prasad_monthly = prasad_activity.groupby("month", as_index=False).agg(
+        received_inr=("received_inr", "sum"),
+        spent_inr=("spent_inr", "sum"),
+    ).rename(columns={
+        "month": "Month",
+        "received_inr": "Received (INR)",
+        "spent_inr": "Spent (INR)",
+    })
+    st.dataframe(prasad_monthly, use_container_width=True, hide_index=True)
 
 st.divider()
 st.subheader("Data quality and reconciliation")
